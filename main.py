@@ -9,51 +9,47 @@ class SafeDict(dict):
     def __missing__(self, k):
         return "{" + k + "}"
 
-def listar_templates():
-    print("--- Templates Disponíveis ---")
+def get_template_paths():
+    """Returns a sorted list of available template paths."""
     if not TEMPLATES_DIR.exists():
         raise SystemExit(f"Diretório não existe: {TEMPLATES_DIR}")
     arquivos = sorted(TEMPLATES_DIR.glob("*.txt"))
     if not arquivos:
         raise SystemExit(f"Nenhum template .txt encontrado em {TEMPLATES_DIR}/")
-    for i, p in enumerate(arquivos, 1):
-        print(f"{i}) {p.name}")
     return arquivos
 
 def render_template(path: Path, data: dict) -> str:
     txt = path.read_text(encoding="utf-8")
     return txt.format_map(SafeDict(data))
 
-# --- NOVO: utilitário simples para extrair placeholders de 1 arquivo
-def _placeholders_de(path: Path) -> list[str]:
-    txt = path.read_text(encoding="utf-8")
-    return sorted(set(re.findall(r"{([^}]+)}", txt)))
+def get_placeholder_names(template_paths: list[Path]) -> list[str]:
+    """Extracts and returns a sorted list of unique placeholder names from given templates."""
+    all_placeholders = set()
+    for arq in template_paths:
+        txt = arq.read_text(encoding="utf-8")
+        all_placeholders.update(re.findall(r"{([^}]+)}", txt))
+    return sorted(all_placeholders)
 
-# --- NOVO: pergunta apenas uma vez para o conjunto (união) de placeholders
-def coletar_dados_uma_vez(arquivos: list[Path]) -> dict:
-    todos = set()
-    for arq in arquivos:
-        todos.update(_placeholders_de(arq))
-    placeholders = sorted(todos)
-
-    print("\n--- Preenchimento de Dados (aplicado a todos) ---")
+def get_interactive_placeholder_data(template_paths: list[Path]) -> dict:
+    """Interactively collects data for all unique placeholders across given templates."""
+    placeholders = get_placeholder_names(template_paths)
+    print("--- Preenchimento de Dados (aplicado a todos) ---")
     dados = {}
     for ph in placeholders:
         val = input(f"{ph}: ")
         dados[ph] = val.replace(" ", "").upper()
     return dados
 
-# --- NOVO: escolha interativa do segundo template (sem mapeamentos)
-def escolher_pareado(templates: list[Path], idx_principal: int) -> Path | None:
-    
-    print("\nDeseja gerar em massa? [S/N]: ", end="")
+def choose_aggregated_template_interactively(templates: list[Path], principal_idx: int) -> Path | None:
+    """Interactively allows the user to choose an aggregated template."""
+    print("Deseja gerar em massa? [S/N]: ", end="")
     resp = input().strip().lower()
     if resp not in {"s", "sim"}:
         return None
 
-    print("\n--- Escolha o template agregado (ENTER para pular) ---")
+    print("--- Escolha o template agregado (ENTER para pular) ---")
     for i, p in enumerate(templates, 1):
-        if i - 1 == idx_principal:
+        if i - 1 == principal_idx:
             continue
         print(f"{i}) {p.name}")
     escolha = input("Nº do template agregado: ").strip()
@@ -61,7 +57,7 @@ def escolher_pareado(templates: list[Path], idx_principal: int) -> Path | None:
         return None
     try:
         idx = int(escolha) - 1
-        if idx == idx_principal or not (0 <= idx < len(templates)):
+        if idx == principal_idx or not (0 <= idx < len(templates)):
             print("Escolha inválida. Ignorando agregado.")
             return None
         return templates[idx]
@@ -69,41 +65,93 @@ def escolher_pareado(templates: list[Path], idx_principal: int) -> Path | None:
         print("Entrada inválida. Ignorando agregado.")
         return None
 
-def main():
-    # 1) Escolha do template principal
-    templates = listar_templates()
+def generate_commands(
+    main_template_idx: int,
+    mass_gen_response: str, # 's' or 'n'
+    aggregated_template_idx: int | None, # 0-based index or None
+    placeholder_data: dict
+) -> list[str]:
+    """
+    Generates commands from templates based on provided choices and data.
+    Returns a list of command strings.
+    """
+    templates = get_template_paths()
+
     try:
-        idx = int(input("Nº do template: ").strip()) - 1
-        tpl_principal = templates[idx]
+        tpl_principal = templates[main_template_idx]
+    except IndexError:
+        raise ValueError("Índice de template principal inválido.")
+
+    tpl_sec = None
+    if mass_gen_response.lower() == 's' and aggregated_template_idx is not None:
+        try:
+            tpl_sec = templates[aggregated_template_idx]
+            if aggregated_template_idx == main_template_idx:
+                tpl_sec = None # Should not be the same
+        except IndexError:
+            pass # Invalid index, just ignore aggregated template
+
+    rendered_outputs = []
+    saida_principal = render_template(tpl_principal, placeholder_data)
+    rendered_outputs.append(saida_principal)
+
+    if tpl_sec:
+        saida_sec = render_template(tpl_sec, placeholder_data)
+        rendered_outputs.append(saida_sec)
+
+    # Split each rendered output by newline and filter empty lines
+    all_commands = []
+    for output_block in rendered_outputs:
+        all_commands.extend([cmd.strip() for cmd in output_block.splitlines() if cmd.strip()])
+    return all_commands
+
+def _interactive_main():
+    """Interactive entry point for main.py."""
+    templates = get_template_paths()
+    print("--- Templates Disponíveis ---")
+    for i, p in enumerate(templates, 1):
+        print(f"{i}) {p.name}")
+
+    try:
+        main_template_idx = int(input("Nº do template: ").strip()) - 1
+        tpl_principal = templates[main_template_idx]
     except (ValueError, IndexError):
         print("Escolha inválida.")
         sys.exit(1)
 
-    # 2) (Opcional) Escolher um segundo template sem mapeamento
-    try:
-        if idx == 1 or idx == 0:  # 1ª e 2ª opções (1-based)
-            tpl_sec = escolher_pareado(templates, idx)
-        else:
-            tpl_sec = None
-    except Exception as e:
-        print(f"Erro ao escolher template agregado: {e}")
-        tpl_sec = None
+    mass_gen_resp = input("Deseja gerar em massa? [S/N]: ").strip().lower()
+    aggregated_template_idx = None
+    if mass_gen_resp == 's':
+        print("--- Escolha o template agregado (ENTER para pular) ---")
+        for i, p in enumerate(templates, 1):
+            if i - 1 == main_template_idx:
+                continue
+            print(f"{i}) {p.name}")
+        escolha_agg = input("Nº do template agregado: ").strip()
+        if escolha_agg:
+            try:
+                agg_idx = int(escolha_agg) - 1
+                if agg_idx != main_template_idx and (0 <= agg_idx < len(templates)):
+                    aggregated_template_idx = agg_idx
+            except ValueError:
+                pass # Invalid input, ignore aggregated
 
-    # 3) Perguntar UMA vez (união dos placeholders dos selecionados)
-    alvos = [tpl_principal] + ([tpl_sec] if tpl_sec else [])
-    dados = coletar_dados_uma_vez(alvos)
+    # Collect data for all relevant placeholders
+    alvos = [tpl_principal]
+    if aggregated_template_idx is not None:
+        alvos.append(templates[aggregated_template_idx])
+    placeholder_data = get_interactive_placeholder_data(alvos)
 
-    # 4) Renderizar principal
-    saida_principal = render_template(tpl_principal, dados)
-
-    print(saida_principal)
-
-    # 5) Renderizar secundário (se houver)
-    if tpl_sec:
-        saida_sec = render_template(tpl_sec, dados)
-
-        print(saida_sec)
+    # Generate and print commands
+    commands = generate_commands(
+        main_template_idx,
+        mass_gen_resp,
+        aggregated_template_idx,
+        placeholder_data
+    )
+    for cmd in commands:
+        print(cmd)
 
 
 if __name__ == "__main__":
-    main()
+    _interactive_main()
